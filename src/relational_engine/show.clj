@@ -1,7 +1,16 @@
 (ns relational-engine.show
   (:require [clojure.java.io])
   (:import (com.github.freva.asciitable AsciiTable)
-           (com.github.freva.asciitable Column)))
+           (com.github.freva.asciitable Column)
+           (java.net Socket)
+           (java.io DataInputStream DataOutputStream)))
+
+(let [socket (Socket. "127.0.0.1" 7524)
+      in (DataInputStream. (.getInputStream socket))
+      out (DataOutputStream. (.getOutputStream socket))
+      msg "PROJECT user/first-name, user/last-name FROM user"]
+  (.writeUTF out msg)
+  (println "Output: " (.readUTF in)))
 
 (let* [data (to-array-2d [["1" "2"]
                           ["1" "2"]
