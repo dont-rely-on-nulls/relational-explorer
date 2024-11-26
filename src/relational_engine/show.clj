@@ -1,16 +1,25 @@
 (ns relational-engine.show
-  (:require [clojure.java.io])
+  (:require [clojure.java.io]
+            [clojure.xml :as xml]
+            [clojure.edn :as edn])
   (:import (com.github.freva.asciitable AsciiTable)
            (com.github.freva.asciitable Column)
            (java.net Socket)
-           (java.io DataInputStream DataOutputStream)))
+           (org.xml.sax InputSource)
+           (java.io InputStreamReader OutputStreamWriter StringReader)
+           (clojure.lang LineNumberingPushbackReader)))
 
-(let [socket (Socket. "127.0.0.1" 7524)
-      in (DataInputStream. (.getInputStream socket))
-      out (DataOutputStream. (.getOutputStream socket))
+(let [socket (new Socket "127.0.0.1" 7524)
+      in (new LineNumberingPushbackReader
+              (new InputStreamReader (. socket (getInputStream))))
+      out (new OutputStreamWriter (. socket (getOutputStream)))
       msg "PROJECT user/first-name, user/last-name FROM user"]
-  (.writeUTF out msg)
-  (println "Output: " (.readUTF in)))
+  (clojure.pprint/pprint
+   (binding [*out* out]
+     (pr msg)
+     (flush)
+     (xml/parse (new InputSource (new StringReader (str "<?xml version='1.0' encoding='utf-8'?>" (read in))))))))
+
 
 (let* [data (to-array-2d [["1" "2"]
                           ["1" "2"]
@@ -40,6 +49,7 @@
             (.with (.header (new Column) "lname:String") :lname)
             (.with (.header (new Column) "Address:String")
                    (fn [x] (AsciiTable/getTable
+                            AsciiTable/FANCY_ASCII
                             (java.util.Arrays/asList (to-array [(:address x)]))
                             (-> [(.with (.header (new Column) "street:String")
                                         :street)
