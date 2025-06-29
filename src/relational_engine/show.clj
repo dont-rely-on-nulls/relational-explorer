@@ -9,17 +9,19 @@
            (java.io InputStreamReader OutputStreamWriter StringReader)
            (clojure.lang LineNumberingPushbackReader)))
 
-(let [socket (new Socket "127.0.0.1" 7524)
-      in (new LineNumberingPushbackReader
-              (new InputStreamReader (. socket (getInputStream))))
-      out (new OutputStreamWriter (. socket (getOutputStream)))
-      msg "PROJECT user/first-name, user/last-name FROM user"]
-  (clojure.pprint/pprint
-   (binding [*out* out]
-     (pr msg)
-     (flush)
-     (xml/parse (new InputSource (new StringReader (str "<?xml version='1.0' encoding='utf-8'?>" (read in))))))))
-
+(defn call []
+  (let [socket (new Socket "127.0.0.1" 7524)
+        in (new LineNumberingPushbackReader
+                (new InputStreamReader (. socket (getInputStream))))
+        out (new OutputStreamWriter (. socket (getOutputStream)))
+        msg "PROJECT user/first-name, user/last-name FROM user"]
+    ;; (clojure.pprint/pprint
+     (binding [*out* out]
+       (pr msg)
+       (flush)
+       (xml/parse (as-> (str "<?xml version='1.0' encoding='utf-8'?>"
+                             (read in)) content
+                    (new InputSource (new StringReader content)))))))
 
 (let* [data (to-array-2d [["1" "2"]
                           ["1" "2"]
@@ -34,6 +36,17 @@
                            ["1" "2" table-internal2]])
        x (AsciiTable/getTable data3)]
       (println x))
+
+(let [content (map (fn [y] (map :content (filter (fn [x] (= :tuples (:tag x))) (:content y)))) (:content (call)))
+      names (mapcat (fn [y] (map :content (filter (fn [x] (= :attribute_name (:tag x))) (:content y)))) (:content (call)))
+      types (mapcat (fn [y] (map :content (filter (fn [x] (= :attribute_type (:tag x))) (:content y)))) (:content (call)))
+      java-cast (comp java.util.Arrays/asList to-array)]
+  (-> (AsciiTable/getTable
+       AsciiTable/FANCY_ASCII
+       (java-cast content)
+       (-> (map (fn [x] (.with (.header (new Column) x) :fname)) names)
+           java-cast))
+      println))
 
 (defrecord Person [fname lname address])
 (defrecord Address [street num])
