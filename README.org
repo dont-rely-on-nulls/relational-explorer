@@ -1,0 +1,5 @@
+#+TITLE: Relational Explorer
+
+A relation explorer REPL for [[https://github.com/Dr-Nekoma/karuta][Karuta]] and [[https://github.com/dont-rely-on-nulls/relational-engine][Relational Engine]].
+
+[[file:./doc/relation_example.png]]

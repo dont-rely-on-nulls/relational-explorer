@@ -51,9 +51,9 @@
 (defrecord Person [fname lname address])
 (defrecord Address [street num])
 
-(let [data [(Person. "Stu" "Halloway" (Address. "Saint James St." 123))
+(let [data [(Person. "Eduardo" "Lemos" (Address. "Saint James St." 123))
             (Person. "Marcos" "Magueta" (Address. "Saint Jerome St." 203))
-            (Person. "Alfred" "Parker" (Address. "Saint Stephen St." 842))]
+            (Person. "Mario" "Pinotti" (Address. "Saint Stephen St." 842))]
       java-cast (comp java.util.Arrays/asList to-array)]
   (-> (AsciiTable/getTable
        AsciiTable/FANCY_ASCII
