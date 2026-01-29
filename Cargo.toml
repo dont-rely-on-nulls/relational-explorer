@@ -1,0 +1,11 @@
+[package]
+name = "sakura-repl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ascii_table = "5.0.0"
+color-eyre = "0.6.5"
+ratatui = "0.30.0"
+quick-xml = "0.37"
+serde = { version = "1.0", features = ["derive"] }

@@ -1,5 +1,16 @@
-#+TITLE: Relational Explorer
+#+TITLE: Sakura REPL
 
-A relation explorer REPL for [[https://github.com/Dr-Nekoma/karuta][Karuta]] and [[https://github.com/dont-rely-on-nulls/relational-engine][Relational Engine]].
+A terminal REPL for the [[https://github.com/dont-rely-on-nulls/sakura][Sakura Relational Engine]].
 
-[[file:./doc/relation_example.png]]
+* Features
+
+- Interactive query execution
+- Scrollable result display
+- Mouse and keyboard navigation
+- Auto-follow latest results
+
+* Usage
+
+Press ~e~ to enter editing mode, type your query, and press ~Enter~ to execute.
+
+Use arrow keys or scroll wheel to navigate through query history.
