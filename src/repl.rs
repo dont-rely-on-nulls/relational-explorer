@@ -1,16 +1,27 @@
 use color_eyre::Result;
 use ratatui::DefaultTerminal;
 
-const LINES_PER_QUERY: u16 = 12;
+use crate::connection::{self, format_response, Connection};
+
+const SERVER_ADDR: &str = "127.0.0.1:7777";
+
+pub struct QueryEntry {
+    pub input: String,
+    pub rendered: String,
+}
 
 /// REPL session state
 pub struct Repl {
     pub input: String,
     pub character_index: usize,
     pub mode: InputMode,
-    pub messages: Vec<String>,
+    pub messages: Vec<QueryEntry>,
     /// Offset from auto-scroll position (negative = scrolled up into history)
     pub manual_scroll: i32,
+    pub connection: Option<Connection>,
+    pub db_hash: String,
+    /// Index into messages for history recall (None = current input)
+    pub history_index: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -20,13 +31,16 @@ pub enum InputMode {
 }
 
 impl Repl {
-    pub const fn new() -> Self {
+    pub fn new(connection: Option<Connection>) -> Self {
         Self {
             input: String::new(),
             mode: InputMode::Normal,
             messages: Vec::new(),
             character_index: 0,
             manual_scroll: 0,
+            connection,
+            db_hash: String::from("--------"),
+            history_index: None,
         }
     }
 
@@ -67,13 +81,15 @@ impl Repl {
     // Text editing
 
     pub fn move_cursor_left(&mut self) {
-        self.character_index = self.character_index
+        self.character_index = self
+            .character_index
             .saturating_sub(1)
             .clamp(0, self.input_length());
     }
 
     pub fn move_cursor_right(&mut self) {
-        self.character_index = self.character_index
+        self.character_index = self
+            .character_index
             .saturating_add(1)
             .clamp(0, self.input_length());
     }
@@ -92,11 +108,98 @@ impl Repl {
     }
 
     pub fn submit_message(&mut self) {
+        if self.input.is_empty() {
+            return;
+        }
+        let cmd = self.input.clone();
+        self.input.clear();
+        self.character_index = 0;
+        self.manual_scroll = 0;
+        self.history_index = None;
+
+        let rendered = self.execute_command(&cmd);
+        self.messages.push(QueryEntry {
+            input: cmd,
+            rendered,
+        });
+    }
+
+    pub fn history_older(&mut self) {
+        if self.messages.is_empty() {
+            return;
+        }
+        let next = match self.history_index {
+            None => self.messages.len() - 1,
+            Some(0) => 0,
+            Some(i) => i - 1,
+        };
+        self.history_index = Some(next);
+        self.input = self.messages[next].input.clone();
+        self.character_index = self.input.chars().count();
+    }
+
+    pub fn history_newer(&mut self) {
+        match self.history_index {
+            None => {}
+            Some(i) if i + 1 >= self.messages.len() => {
+                self.history_index = None;
+                self.input.clear();
+                self.character_index = 0;
+            }
+            Some(i) => {
+                self.history_index = Some(i + 1);
+                self.input = self.messages[i + 1].input.clone();
+                self.character_index = self.input.chars().count();
+            }
+        }
+    }
+
+    pub fn copy_last_result(&self) {
+        if let Some(entry) = self.messages.last() {
+            let text = format!("{}\n", entry.rendered);
+            let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text));
+        }
+    }
+
+    pub fn copy_input(&self) {
         if !self.input.is_empty() {
-            self.messages.push(self.input.clone());
-            self.input.clear();
-            self.character_index = 0;
-            self.manual_scroll = 0;
+            let _ = arboard::Clipboard::new().and_then(|mut cb| cb.set_text(self.input.clone()));
+        }
+    }
+
+    fn execute_command(&mut self, cmd: &str) -> String {
+        let result = if let Some(conn) = &mut self.connection {
+            conn.send(cmd).map_err(|e| e.to_string())
+        } else {
+            Err(String::from("not connected"))
+        };
+
+        match result {
+            Ok(resp) => {
+                self.db_hash = resp.db_hash().to_string();
+                format_response(&resp)
+            }
+            Err(_) => {
+                // Try to (re)connect and retry once
+                match connection::Connection::connect(SERVER_ADDR) {
+                    Ok(mut conn) => match conn.send(cmd) {
+                        Ok(resp) => {
+                            self.db_hash = resp.db_hash().to_string();
+                            let rendered = format_response(&resp);
+                            self.connection = Some(conn);
+                            rendered
+                        }
+                        Err(e) => {
+                            self.connection = Some(conn);
+                            format!("ERROR: {}", e)
+                        }
+                    },
+                    Err(_) => {
+                        self.connection = None;
+                        String::from("ERROR: server unreachable (127.0.0.1:7777)")
+                    }
+                }
+            }
         }
     }
 
@@ -128,8 +231,14 @@ impl Repl {
         self.apply_manual_scroll(auto_scroll)
     }
 
-    fn total_content_lines(&self) -> u16 {
-        (self.messages.len() as u16) * LINES_PER_QUERY
+    pub fn total_content_lines(&self) -> u16 {
+        self.messages
+            .iter()
+            .map(|entry| format!("sakura=> {}\n\n{}\n", entry.input, entry.rendered))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .lines()
+            .count() as u16
     }
 
     fn apply_manual_scroll(&self, base: u16) -> u16 {

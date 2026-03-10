@@ -1,4 +1,3 @@
-use ascii_table::AsciiTable;
 use ratatui::{
     layout::{Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -44,7 +43,9 @@ fn help_text(mode: InputMode) -> Option<(Vec<Span<'static>>, Style)> {
                 ("e", true),
                 (" to edit, ", false),
                 ("↑↓", true),
-                (" to scroll", false),
+                (" to scroll, ", false),
+                ("y", true),
+                (" to copy last result", false),
             ]
             .into_iter()
             .map(|(text, bold)| if bold { text.bold() } else { text.into() })
@@ -57,7 +58,11 @@ fn help_text(mode: InputMode) -> Option<(Vec<Span<'static>>, Style)> {
                 ("Esc", true),
                 (" to stop editing, ", false),
                 ("Enter", true),
-                (" to submit", false),
+                (" to submit, ", false),
+                ("↑↓", true),
+                (" history, ", false),
+                ("Ctrl+Y", true),
+                (" to copy input", false),
             ]
             .into_iter()
             .map(|(text, bold)| if bold { text.bold() } else { text.into() })
@@ -106,58 +111,19 @@ fn render_messages(repl: &Repl, frame: &mut Frame, area: Rect) {
 }
 
 fn messages_widget(repl: &Repl, height: u16) -> Paragraph<'_> {
-    let content = build_query_results(&repl.messages);
+    let content = build_query_results(repl);
     let scroll = repl.calculate_scroll_offset(height);
+    let title = format!("Query Results  [db: {}]", repl.db_hash);
 
     Paragraph::new(content)
-        .block(Block::bordered().title("Query Results"))
+        .block(Block::bordered().title(title))
         .scroll((scroll, 0))
 }
 
-fn build_query_results(messages: &[String]) -> String {
-    messages
+fn build_query_results(repl: &Repl) -> String {
+    repl.messages
         .iter()
-        .map(|msg| format_query_result(msg))
+        .map(|entry| format!("sakura=> {}\n\n{}\n", entry.input, entry.rendered))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn format_query_result(query: &str) -> String {
-    format!(
-        "sakura=> {}\n\n{}\n(3 rows)\n",
-        query,
-        mock_table_result()
-    )
-}
-
-/// Mock database result table (will be replaced with real query execution)
-fn mock_table_result() -> String {
-    let headers = ["ID", "Name", "Age"];
-    let rows = [
-        ["1", "Alice", "30"],
-        ["2", "Bob", "25"],
-        ["3", "Charlie", "35"],
-    ];
-
-    render_table(headers, rows)
-}
-
-fn render_table<const N: usize>(headers: [&str; N], rows: [[&str; N]; 3]) -> String {
-    let mut table = AsciiTable::default();
-
-    headers
-        .iter()
-        .enumerate()
-        .for_each(|(i, &header)| {
-            table.column(i).set_header(header);
-        });
-
-    let data: Vec<Vec<String>> = rows
-        .iter()
-        .map(|row| row.iter().map(|&s| s.to_string()).collect())
-        .collect();
-
-    let mut output = Vec::new();
-    table.writeln(&mut output, &data).ok();
-    String::from_utf8(output).unwrap_or_default()
 }
