@@ -31,6 +31,13 @@ fn connect_with_retry(attempts: u32, delay: Duration) -> Option<connection::Conn
 fn main() -> Result<()> {
     color_eyre::install()?;
 
+    // Install panic hook to restore terminal on panic
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        ratatui::restore();
+        default_panic(panic_info);
+    }));
+
     // If the server is already running, connect directly.
     // Otherwise spawn it and retry.
     let (conn, server_child) =

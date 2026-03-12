@@ -17,6 +17,7 @@ pub enum ServerResponse {
         db_hash: String,
     },
     Error {
+        kind: String,
         message: String,
         db_hash: String,
     },
@@ -56,8 +57,15 @@ pub fn format_response(resp: &ServerResponse) -> String {
             };
             format!("{}\n{}{}", name, table, suffix)
         }
-        ServerResponse::Ok { message, .. } => format!("OK: {}", message),
-        ServerResponse::Error { message, .. } => format!("ERROR: {}", message),
+        ServerResponse::Ok { .. } => String::from("OK"),
+        ServerResponse::Error { kind, message, .. } => format!("{}: {}", kind, message),
+    }
+}
+
+pub fn error_parts(resp: &ServerResponse) -> Option<(&str, &str)> {
+    match resp {
+        ServerResponse::Error { kind, message, .. } => Some((kind.as_str(), message.as_str())),
+        _ => None,
     }
 }
 
@@ -102,6 +110,15 @@ fn atom_string(s: &sexp::Sexp) -> Option<String> {
     }
 }
 
+fn atom_string_debug(s: &sexp::Sexp) -> String {
+    match s {
+        sexp::Sexp::Atom(sexp::Atom::S(s)) => s.clone(),
+        sexp::Sexp::Atom(sexp::Atom::I(n)) => n.to_string(),
+        sexp::Sexp::Atom(sexp::Atom::F(f)) => f.to_string(),
+        sexp::Sexp::List(l) => format!("(list with {} items)", l.len()),
+    }
+}
+
 /// Find the value for `key` in a plist-style list: `((key val) ...)`.
 fn get_field<'a>(items: &'a [sexp::Sexp], key: &str) -> Option<&'a sexp::Sexp> {
     items.iter().find_map(|item| {
@@ -136,14 +153,24 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
 
     match tag.as_str() {
         "ok" => {
-            let message = get_str(rest, "message").unwrap_or_default();
+            let message = match get_field(rest, "message") {
+                Some(field) => atom_string_debug(field),
+                None => "(message field missing)".to_string(),
+            };
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
             Ok(ServerResponse::Ok { message, db_hash })
         }
         "error" => {
-            let message = get_str(rest, "message").unwrap_or_default();
+            let raw = match get_field(rest, "message") {
+                Some(field) => atom_string_debug(field),
+                None => format!("(message field malformed or missing; full response: {:?})", rest),
+            };
+            let (kind, message) = match raw.split_once(": ") {
+                Some((k, m)) => (k.to_string(), m.to_string()),
+                None => (String::from("Error"), raw),
+            };
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
-            Ok(ServerResponse::Error { message, db_hash })
+            Ok(ServerResponse::Error { kind, message, db_hash })
         }
         "relation" => {
             let name = get_str(rest, "name").unwrap_or_default();
@@ -230,6 +257,11 @@ impl Connection {
     pub fn send(&mut self, cmd: &str) -> std::io::Result<ServerResponse> {
         writeln!(self.stream, "{}", cmd)?;
         self.stream.flush()?;
+
+        // Set read timeout to prevent indefinite blocking
+        self.stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+
         let mut line = String::new();
         self.reader.read_line(&mut line)?;
         parse_response(line.trim())

@@ -10,9 +10,30 @@ pub fn handle_event(repl: &mut Repl) -> Result<bool> {
 }
 
 fn dispatch_event(repl: &mut Repl, event: Event) -> Result<bool> {
+    // Dismiss error popup on any key press
+    if repl.error_popup.is_some() {
+        if matches!(event, Event::Key(_)) {
+            repl.error_popup = None;
+        }
+        return Ok(false);
+    }
+
     match event {
         Event::Key(key) if should_handle_key(repl.mode, key.kind) => {
             handle_key(repl, key.code, key.modifiers)
+        }
+        Event::Paste(text) => {
+            if matches!(repl.mode, InputMode::Editing) {
+                // Insert pasted text as-is, preserving newlines
+                for ch in text.chars() {
+                    if ch == '\n' {
+                        repl.enter_newline();
+                    } else {
+                        repl.enter_char(ch);
+                    }
+                }
+            }
+            Ok(false)
         }
         Event::Mouse(mouse) => Ok(handle_mouse(repl, mouse.kind)),
         _ => Ok(false),
@@ -49,7 +70,13 @@ fn handle_editing_mode(repl: &mut Repl, key: KeyCode, modifiers: KeyModifiers) -
     use KeyCode::*;
     match key {
         Esc => repl.mode = InputMode::Normal,
-        Enter => repl.submit_message(),
+        Enter => {
+            if modifiers.contains(KeyModifiers::ALT) {
+                repl.submit_message();
+            } else {
+                repl.enter_newline();
+            }
+        }
         Backspace => repl.delete_char(),
         Left => repl.move_cursor_left(),
         Right => repl.move_cursor_right(),

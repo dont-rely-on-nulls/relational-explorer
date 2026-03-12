@@ -22,6 +22,10 @@ pub struct Repl {
     pub db_hash: String,
     /// Index into messages for history recall (None = current input)
     pub history_index: Option<usize>,
+    /// Current line number in multiline input
+    pub cursor_line: usize,
+    /// Active error popup (kind, message), if any
+    pub error_popup: Option<(String, String)>,
 }
 
 #[derive(Clone, Copy)]
@@ -41,41 +45,33 @@ impl Repl {
             connection,
             db_hash: String::from("--------"),
             history_index: None,
+            cursor_line: 0,
+            error_popup: None,
         }
     }
 
-    /// Main event loop with mouse support
     pub fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
-        Self::enable_mouse_capture()?;
-        let result = self.event_loop(&mut terminal);
-        Self::disable_mouse_capture()?;
-        result
+        self.event_loop(&mut terminal)
     }
 
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
-            terminal.draw(|frame| crate::ui::render(self, frame))?;
+            // Render with error recovery
+            if let Err(e) = terminal.draw(|frame| crate::ui::render(self, frame)) {
+                eprintln!("Render error: {}", e);
+                continue;
+            }
 
-            if crate::input::handle_event(self)? {
-                return Ok(());
+            // Handle input with error recovery
+            match crate::input::handle_event(self) {
+                Ok(should_quit) if should_quit => return Ok(()),
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("Input error: {}", e);
+                    continue;
+                }
             }
         }
-    }
-
-    fn enable_mouse_capture() -> Result<()> {
-        ratatui::crossterm::execute!(
-            std::io::stdout(),
-            ratatui::crossterm::event::EnableMouseCapture
-        )?;
-        Ok(())
-    }
-
-    fn disable_mouse_capture() -> Result<()> {
-        ratatui::crossterm::execute!(
-            std::io::stdout(),
-            ratatui::crossterm::event::DisableMouseCapture
-        )?;
-        Ok(())
     }
 
     // Text editing
@@ -99,11 +95,27 @@ impl Repl {
         self.move_cursor_right();
     }
 
+    pub fn enter_newline(&mut self) {
+        self.input.insert(self.byte_index(), '\n');
+        self.character_index += 1;
+        self.cursor_line += 1;
+    }
+
     /// Deletes char before cursor (backspace behavior)
     pub fn delete_char(&mut self) {
         if self.character_index > 0 {
+            let char_to_delete = self.input
+                .chars()
+                .nth(self.character_index - 1)
+                .unwrap_or(' ');
+
             self.input = self.input_without_char_at(self.character_index - 1);
             self.move_cursor_left();
+
+            // Update cursor_line if deleting a newline
+            if char_to_delete == '\n' && self.cursor_line > 0 {
+                self.cursor_line -= 1;
+            }
         }
     }
 
@@ -114,6 +126,7 @@ impl Repl {
         let cmd = self.input.clone();
         self.input.clear();
         self.character_index = 0;
+        self.cursor_line = 0;
         self.manual_scroll = 0;
         self.history_index = None;
 
@@ -136,6 +149,7 @@ impl Repl {
         self.history_index = Some(next);
         self.input = self.messages[next].input.clone();
         self.character_index = self.input.chars().count();
+        self.cursor_line = self.input.lines().count().saturating_sub(1);
     }
 
     pub fn history_newer(&mut self) {
@@ -145,11 +159,13 @@ impl Repl {
                 self.history_index = None;
                 self.input.clear();
                 self.character_index = 0;
+                self.cursor_line = 0;
             }
             Some(i) => {
                 self.history_index = Some(i + 1);
                 self.input = self.messages[i + 1].input.clone();
                 self.character_index = self.input.chars().count();
+                self.cursor_line = self.input.lines().count().saturating_sub(1);
             }
         }
     }
@@ -168,8 +184,11 @@ impl Repl {
     }
 
     fn execute_command(&mut self, cmd: &str) -> String {
+        // The server reads one command per line via input_line. Collapse
+        // multiline input to a single line so the protocol stays in sync.
+        let cmd = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
         let result = if let Some(conn) = &mut self.connection {
-            conn.send(cmd).map_err(|e| e.to_string())
+            conn.send(&cmd).map_err(|e| e.to_string())
         } else {
             Err(String::from("not connected"))
         };
@@ -177,26 +196,31 @@ impl Repl {
         match result {
             Ok(resp) => {
                 self.db_hash = resp.db_hash().to_string();
-                format_response(&resp)
+                if let Some((kind, msg)) = connection::error_parts(&resp) {
+                    self.error_popup = Some((kind.to_string(), msg.to_string()));
+                    String::new()
+                } else {
+                    format_response(&resp)
+                }
             }
-            Err(_) => {
+            Err(send_err) => {
                 // Try to (re)connect and retry once
                 match connection::Connection::connect(SERVER_ADDR) {
-                    Ok(mut conn) => match conn.send(cmd) {
+                    Ok(mut conn) => match conn.send(&cmd) {
                         Ok(resp) => {
                             self.db_hash = resp.db_hash().to_string();
                             let rendered = format_response(&resp);
                             self.connection = Some(conn);
                             rendered
                         }
-                        Err(e) => {
+                        Err(retry_err) => {
                             self.connection = Some(conn);
-                            format!("ERROR: {}", e)
+                            format!("ERROR: failed to parse server response: {} (retry error: {})", send_err, retry_err)
                         }
                     },
-                    Err(_) => {
+                    Err(connect_err) => {
                         self.connection = None;
-                        String::from("ERROR: server unreachable (127.0.0.1:7777)")
+                        format!("ERROR: server unreachable (127.0.0.1:7777): {}", connect_err)
                     }
                 }
             }
