@@ -164,7 +164,31 @@ fn get_str(items: &[sexp::Sexp], key: &str) -> Option<String> {
     get_field(items, key).and_then(|v| atom_string(v))
 }
 
+/// Insert a space before any `"` that is not preceded by a sexp delimiter
+/// (`(`, `)`, whitespace, or `\`).  OCaml's Sexplib serialises atoms and
+/// quoted strings without an intervening space (e.g. `(name"C. J. Date")`),
+/// but the `sexp` crate's unquoted-atom parser does not treat `"` as a
+/// token boundary, so the atom and the opening quote get merged into one
+/// token.  This pre-pass fixes the encoding before handing the string to
+/// the parser.
+fn normalize_sexp_spacing(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    let chars: Vec<char> = s.chars().collect();
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch == '"' && i > 0 {
+            let prev = chars[i - 1];
+            if prev != '(' && prev != ')' && prev != '\\' && !prev.is_whitespace() {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
+    let normalized = normalize_sexp_spacing(s);
+    let s = normalized.as_str();
     let sexp = sexp::parse(s)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
