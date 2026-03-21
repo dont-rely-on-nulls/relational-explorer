@@ -11,15 +11,21 @@ pub enum ServerResponse {
         row_count: u32,
         truncated: bool,
         db_hash: String,
+        db_name: String,
+        branch: String,
     },
     Ok {
         message: String,
         db_hash: String,
+        db_name: String,
+        branch: String,
     },
     Error {
         kind: String,
         message: String,
         db_hash: String,
+        db_name: String,
+        branch: String,
     },
 }
 
@@ -35,6 +41,22 @@ impl ServerResponse {
             ServerResponse::Relation { db_hash, .. } => db_hash,
             ServerResponse::Ok { db_hash, .. } => db_hash,
             ServerResponse::Error { db_hash, .. } => db_hash,
+        }
+    }
+
+    pub fn db_name(&self) -> &str {
+        match self {
+            ServerResponse::Relation { db_name, .. } => db_name,
+            ServerResponse::Ok { db_name, .. } => db_name,
+            ServerResponse::Error { db_name, .. } => db_name,
+        }
+    }
+
+    pub fn branch(&self) -> &str {
+        match self {
+            ServerResponse::Relation { branch, .. } => branch,
+            ServerResponse::Ok { branch, .. } => branch,
+            ServerResponse::Error { branch, .. } => branch,
         }
     }
 }
@@ -57,7 +79,7 @@ pub fn format_response(resp: &ServerResponse) -> String {
             };
             format!("{}\n{}{}", name, table, suffix)
         }
-        ServerResponse::Ok { .. } => String::from("OK"),
+        ServerResponse::Ok { message, .. } => format!("OK  {}", message),
         ServerResponse::Error { kind, message, .. } => format!("{}: {}", kind, message),
     }
 }
@@ -158,7 +180,9 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 None => "(message field missing)".to_string(),
             };
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
-            Ok(ServerResponse::Ok { message, db_hash })
+            let db_name = get_str(rest, "db_name").unwrap_or_default();
+            let branch  = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
+            Ok(ServerResponse::Ok { message, db_hash, db_name, branch })
         }
         "error" => {
             let raw = match get_field(rest, "message") {
@@ -170,11 +194,15 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 None => (String::from("Error"), raw),
             };
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
-            Ok(ServerResponse::Error { kind, message, db_hash })
+            let db_name = get_str(rest, "db_name").unwrap_or_default();
+            let branch  = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
+            Ok(ServerResponse::Error { kind, message, db_hash, db_name, branch })
         }
         "relation" => {
-            let name = get_str(rest, "name").unwrap_or_default();
+            let name    = get_str(rest, "name").unwrap_or_default();
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
+            let db_name = get_str(rest, "db_name").unwrap_or_default();
+            let branch  = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
             let row_count = get_str(rest, "row_count")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
@@ -232,6 +260,8 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 row_count,
                 truncated,
                 db_hash,
+                db_name,
+                branch,
             })
         }
         other => Err(std::io::Error::new(

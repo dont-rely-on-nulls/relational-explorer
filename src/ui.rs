@@ -143,7 +143,10 @@ fn render_messages(repl: &Repl, frame: &mut Frame, area: Rect) {
 fn messages_widget(repl: &Repl, height: u16) -> Paragraph<'_> {
     let content = build_query_results(repl);
     let scroll = repl.calculate_scroll_offset(height);
-    let title = format!("Query Results  [db: {}]", repl.db_hash);
+    let title = format!(
+        "Query Results  [db: {} | branch: {} | hash: {}]",
+        repl.db_name, repl.branch, repl.db_hash
+    );
 
     Paragraph::new(content)
         .block(Block::bordered().title(title))

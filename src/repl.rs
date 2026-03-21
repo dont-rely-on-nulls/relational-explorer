@@ -20,6 +20,8 @@ pub struct Repl {
     pub manual_scroll: i32,
     pub connection: Option<Connection>,
     pub db_hash: String,
+    pub db_name: String,
+    pub branch: String,
     /// Index into messages for history recall (None = current input)
     pub history_index: Option<usize>,
     /// Current line number in multiline input
@@ -44,6 +46,8 @@ impl Repl {
             manual_scroll: 0,
             connection,
             db_hash: String::from("--------"),
+            db_name: String::from("?"),
+            branch:  String::from("--"),
             history_index: None,
             cursor_line: 0,
             error_popup: None,
@@ -196,6 +200,8 @@ impl Repl {
         match result {
             Ok(resp) => {
                 self.db_hash = resp.db_hash().to_string();
+                self.db_name = resp.db_name().to_string();
+                self.branch  = resp.branch().to_string();
                 if let Some((kind, msg)) = connection::error_parts(&resp) {
                     self.error_popup = Some((kind.to_string(), msg.to_string()));
                     String::new()
@@ -209,6 +215,8 @@ impl Repl {
                     Ok(mut conn) => match conn.send(&cmd) {
                         Ok(resp) => {
                             self.db_hash = resp.db_hash().to_string();
+                            self.db_name = resp.db_name().to_string();
+                            self.branch  = resp.branch().to_string();
                             let rendered = format_response(&resp);
                             self.connection = Some(conn);
                             rendered
