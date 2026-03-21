@@ -123,6 +123,13 @@ fn render_table(schema: &[SchemaField], rows: &[Vec<(String, String)>]) -> Strin
 
 // --- S-expression parsing ---
 
+/// Extract a displayable string from an S-expression atom.
+///
+/// Maps the OCaml `AbstractValue.sexp_of_t` output to Rust strings:
+///   - integers  → `Atom::I(n)` → decimal string
+///   - floats    → `Atom::F(f)` → float string (includes NaN)
+///   - strings   → `Atom::S(s)` → verbatim
+///   - opaque    → `Atom::S("<opaque>")`
 fn atom_string(s: &sexp::Sexp) -> Option<String> {
     match s {
         sexp::Sexp::Atom(sexp::Atom::S(s)) => Some(s.clone()),

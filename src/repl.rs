@@ -191,6 +191,15 @@ impl Repl {
         // The server reads one command per line via input_line. Collapse
         // multiline input to a single line so the protocol stays in sync.
         let cmd = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // Client-side validation: catch malformed S-expressions before sending.
+        if let crate::language::InputClassification::MalformedSexp(err) = crate::language::classify(&cmd) {
+            return format!("Syntax error: {}", err);
+        }
+
+        // Rewrite client shortcuts (e.g. (schema) → (drl (Base sakura:attribute))).
+        let cmd = crate::language::rewrite(&cmd);
+
         let result = if let Some(conn) = &mut self.connection {
             conn.send(&cmd).map_err(|e| e.to_string())
         } else {

@@ -1,5 +1,6 @@
 mod connection;
 mod input;
+mod language;
 mod repl;
 mod ui;
 
