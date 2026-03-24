@@ -9,10 +9,11 @@ pub enum Tag {
     Dml,
     Icl,
     Dcl,
+    Scl,
 }
 
 impl Tag {
-    pub const ALL: &[Tag] = &[Tag::Drl, Tag::Ddl, Tag::Dml, Tag::Icl, Tag::Dcl];
+    pub const ALL: &[Tag] = &[Tag::Drl, Tag::Ddl, Tag::Dml, Tag::Icl, Tag::Dcl, Tag::Scl];
 
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -21,6 +22,7 @@ impl Tag {
             Tag::Dml => "dml",
             Tag::Icl => "icl",
             Tag::Dcl => "dcl",
+            Tag::Scl => "scl",
         }
     }
 
@@ -31,6 +33,7 @@ impl Tag {
             "dml" => Some(Tag::Dml),
             "icl" => Some(Tag::Icl),
             "dcl" => Some(Tag::Dcl),
+            "scl" => Some(Tag::Scl),
             _ => None,
         }
     }
@@ -103,6 +106,7 @@ mod tests {
         assert!(matches!(classify("(ddl (CreateDatabase \"test\"))"), InputClassification::Envelope(Tag::Ddl)));
         assert!(matches!(classify("(drl (Base sakura:attribute))"), InputClassification::Envelope(Tag::Drl)));
         assert!(matches!(classify("(dcl GetHead)"), InputClassification::Envelope(Tag::Dcl)));
+        assert!(matches!(classify("(scl (Begin (query (Base sakura:attribute)) (limit 3)))"), InputClassification::Envelope(Tag::Scl)));
     }
 
     #[test]

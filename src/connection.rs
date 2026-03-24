@@ -27,6 +27,15 @@ pub enum ServerResponse {
         db_name: String,
         branch: String,
     },
+    Cursor {
+        cursor_id: String,
+        rows: Vec<Vec<(String, String)>>,
+        row_count: u32,
+        has_more: bool,
+        db_hash: String,
+        db_name: String,
+        branch: String,
+    },
 }
 
 #[derive(Debug)]
@@ -41,6 +50,7 @@ impl ServerResponse {
             ServerResponse::Relation { db_hash, .. } => db_hash,
             ServerResponse::Ok { db_hash, .. } => db_hash,
             ServerResponse::Error { db_hash, .. } => db_hash,
+            ServerResponse::Cursor { db_hash, .. } => db_hash,
         }
     }
 
@@ -49,6 +59,7 @@ impl ServerResponse {
             ServerResponse::Relation { db_name, .. } => db_name,
             ServerResponse::Ok { db_name, .. } => db_name,
             ServerResponse::Error { db_name, .. } => db_name,
+            ServerResponse::Cursor { db_name, .. } => db_name,
         }
     }
 
@@ -57,6 +68,7 @@ impl ServerResponse {
             ServerResponse::Relation { branch, .. } => branch,
             ServerResponse::Ok { branch, .. } => branch,
             ServerResponse::Error { branch, .. } => branch,
+            ServerResponse::Cursor { branch, .. } => branch,
         }
     }
 }
@@ -81,6 +93,36 @@ pub fn format_response(resp: &ServerResponse) -> String {
         }
         ServerResponse::Ok { message, .. } => format!("OK  {}", message),
         ServerResponse::Error { kind, message, .. } => format!("{}: {}", kind, message),
+        ServerResponse::Cursor {
+            cursor_id,
+            rows,
+            row_count,
+            has_more,
+            ..
+        } => {
+            // Infer schema from first row's keys (cursor responses are self-describing)
+            let schema: Vec<SchemaField> = rows
+                .first()
+                .map(|row| {
+                    row.iter()
+                        .map(|(k, _)| SchemaField {
+                            attr: k.clone(),
+                            domain: String::new(),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let table = render_table(&schema, rows);
+            let short_id = if cursor_id.len() > 8 {
+                &cursor_id[..8]
+            } else {
+                cursor_id
+            };
+            format!(
+                "{}({} rows, cursor: {}, has_more: {})",
+                table, row_count, short_id, has_more
+            )
+        }
     }
 }
 
@@ -290,6 +332,54 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 rows,
                 row_count,
                 truncated,
+                db_hash,
+                db_name,
+                branch,
+            })
+        }
+        "cursor" => {
+            let cursor_id = get_str(rest, "id").unwrap_or_default();
+            let db_hash   = get_str(rest, "db_hash").unwrap_or_default();
+            let db_name   = get_str(rest, "db_name").unwrap_or_default();
+            let branch    = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
+            let row_count = get_str(rest, "row_count")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let has_more  = get_str(rest, "has_more").as_deref() == Some("true");
+
+            let rows = match get_field(rest, "rows") {
+                Some(sexp::Sexp::List(row_list)) => row_list
+                    .iter()
+                    .filter_map(|row| {
+                        if let sexp::Sexp::List(pairs) = row {
+                            Some(
+                                pairs
+                                    .iter()
+                                    .filter_map(|pair| {
+                                        if let sexp::Sexp::List(p) = pair {
+                                            if p.len() == 2 {
+                                                let k = atom_string(&p[0])?;
+                                                let v = atom_string(&p[1])?;
+                                                return Some((k, v));
+                                            }
+                                        }
+                                        None
+                                    })
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+                _ => vec![],
+            };
+
+            Ok(ServerResponse::Cursor {
+                cursor_id,
+                rows,
+                row_count,
+                has_more,
                 db_hash,
                 db_name,
                 branch,
