@@ -3,8 +3,6 @@ use ratatui::DefaultTerminal;
 
 use crate::connection::{self, format_response, Connection};
 
-const SERVER_ADDR: &str = "127.0.0.1:7777";
-
 pub struct QueryEntry {
     pub input: String,
     pub rendered: String,
@@ -19,6 +17,8 @@ pub struct Repl {
     /// Offset from auto-scroll position (negative = scrolled up into history)
     pub manual_scroll: i32,
     pub connection: Option<Connection>,
+    /// Server address used for (re)connection — TCP `host:port` or Unix socket path.
+    pub server_addr: String,
     pub db_hash: String,
     pub db_name: String,
     pub branch: String,
@@ -37,7 +37,7 @@ pub enum InputMode {
 }
 
 impl Repl {
-    pub fn new(connection: Option<Connection>) -> Self {
+    pub fn new(connection: Option<Connection>, server_addr: String) -> Self {
         Self {
             input: String::new(),
             mode: InputMode::Normal,
@@ -45,9 +45,10 @@ impl Repl {
             character_index: 0,
             manual_scroll: 0,
             connection,
+            server_addr,
             db_hash: String::from("--------"),
             db_name: String::from("?"),
-            branch:  String::from("--"),
+            branch: String::from("--"),
             history_index: None,
             cursor_line: 0,
             error_popup: None,
@@ -108,7 +109,8 @@ impl Repl {
     /// Deletes char before cursor (backspace behavior)
     pub fn delete_char(&mut self) {
         if self.character_index > 0 {
-            let char_to_delete = self.input
+            let char_to_delete = self
+                .input
                 .chars()
                 .nth(self.character_index - 1)
                 .unwrap_or(' ');
@@ -193,7 +195,9 @@ impl Repl {
         let cmd = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
 
         // Client-side validation: catch malformed S-expressions before sending.
-        if let crate::language::InputClassification::MalformedSexp(err) = crate::language::classify(&cmd) {
+        if let crate::language::InputClassification::MalformedSexp(err) =
+            crate::language::classify(&cmd)
+        {
             return format!("Syntax error: {}", err);
         }
 
@@ -210,7 +214,7 @@ impl Repl {
             Ok(resp) => {
                 self.db_hash = resp.db_hash().to_string();
                 self.db_name = resp.db_name().to_string();
-                self.branch  = resp.branch().to_string();
+                self.branch = resp.branch().to_string();
                 if let Some((kind, msg)) = connection::error_parts(&resp) {
                     self.error_popup = Some((kind.to_string(), msg.to_string()));
                     String::new()
@@ -220,24 +224,30 @@ impl Repl {
             }
             Err(send_err) => {
                 // Try to (re)connect and retry once
-                match connection::Connection::connect(SERVER_ADDR) {
+                match connection::Connection::connect(&self.server_addr) {
                     Ok(mut conn) => match conn.send(&cmd) {
                         Ok(resp) => {
                             self.db_hash = resp.db_hash().to_string();
                             self.db_name = resp.db_name().to_string();
-                            self.branch  = resp.branch().to_string();
+                            self.branch = resp.branch().to_string();
                             let rendered = format_response(&resp);
                             self.connection = Some(conn);
                             rendered
                         }
                         Err(retry_err) => {
                             self.connection = Some(conn);
-                            format!("ERROR: failed to parse server response: {} (retry error: {})", send_err, retry_err)
+                            format!(
+                                "ERROR: failed to parse server response: {} (retry error: {})",
+                                send_err, retry_err
+                            )
                         }
                     },
                     Err(connect_err) => {
                         self.connection = None;
-                        format!("ERROR: server unreachable (127.0.0.1:7777): {}", connect_err)
+                        format!(
+                            "ERROR: server unreachable ({}): {}",
+                            self.server_addr, connect_err
+                        )
                     }
                 }
             }

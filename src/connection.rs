@@ -1,6 +1,8 @@
 use ascii_table::AsciiTable;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
 
 #[derive(Debug)]
 pub enum ServerResponse {
@@ -41,6 +43,7 @@ pub enum ServerResponse {
 #[derive(Debug)]
 pub struct SchemaField {
     pub attr: String,
+    #[allow(dead_code)]
     pub domain: String,
 }
 
@@ -236,7 +239,12 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
 
     let items = match &sexp {
         sexp::Sexp::List(items) => items,
-        _ => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "expected list")),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expected list",
+            ))
+        }
     };
 
     let tag = items
@@ -254,13 +262,21 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
             };
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
             let db_name = get_str(rest, "db_name").unwrap_or_default();
-            let branch  = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
-            Ok(ServerResponse::Ok { message, db_hash, db_name, branch })
+            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
+            Ok(ServerResponse::Ok {
+                message,
+                db_hash,
+                db_name,
+                branch,
+            })
         }
         "error" => {
             let raw = match get_field(rest, "message") {
                 Some(field) => atom_string_debug(field),
-                None => format!("(message field malformed or missing; full response: {:?})", rest),
+                None => format!(
+                    "(message field malformed or missing; full response: {:?})",
+                    rest
+                ),
             };
             let (kind, message) = match raw.split_once(": ") {
                 Some((k, m)) => (k.to_string(), m.to_string()),
@@ -268,14 +284,20 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
             };
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
             let db_name = get_str(rest, "db_name").unwrap_or_default();
-            let branch  = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
-            Ok(ServerResponse::Error { kind, message, db_hash, db_name, branch })
+            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
+            Ok(ServerResponse::Error {
+                kind,
+                message,
+                db_hash,
+                db_name,
+                branch,
+            })
         }
         "relation" => {
-            let name    = get_str(rest, "name").unwrap_or_default();
+            let name = get_str(rest, "name").unwrap_or_default();
             let db_hash = get_str(rest, "db_hash").unwrap_or_default();
             let db_name = get_str(rest, "db_name").unwrap_or_default();
-            let branch  = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
+            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
             let row_count = get_str(rest, "row_count")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
@@ -339,13 +361,13 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
         }
         "cursor" => {
             let cursor_id = get_str(rest, "id").unwrap_or_default();
-            let db_hash   = get_str(rest, "db_hash").unwrap_or_default();
-            let db_name   = get_str(rest, "db_name").unwrap_or_default();
-            let branch    = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
+            let db_hash = get_str(rest, "db_hash").unwrap_or_default();
+            let db_name = get_str(rest, "db_name").unwrap_or_default();
+            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
             let row_count = get_str(rest, "row_count")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
-            let has_more  = get_str(rest, "has_more").as_deref() == Some("true");
+            let has_more = get_str(rest, "has_more").as_deref() == Some("true");
 
             let rows = match get_field(rest, "rows") {
                 Some(sexp::Sexp::List(row_list)) => row_list
@@ -389,29 +411,49 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
             std::io::ErrorKind::InvalidData,
             format!("unknown response tag: {}", other),
         )),
-
     }
 }
 
 pub struct Connection {
-    stream: TcpStream,
-    reader: BufReader<TcpStream>,
+    writer: Box<dyn Write + Send>,
+    reader: BufReader<Box<dyn Read + Send>>,
+}
+
+/// Determines whether `addr` looks like a Unix socket path (contains `/` or
+/// ends with `.sock`) versus a TCP `host:port` address.
+pub fn is_unix_socket(addr: &str) -> bool {
+    addr.contains('/') || addr.ends_with(".sock")
 }
 
 impl Connection {
+    /// Connect to the server at `addr`.
+    ///
+    /// If `addr` looks like a filesystem path (contains `/` or ends with
+    /// `.sock`), a Unix domain socket is used.  Otherwise it is treated as a
+    /// TCP `host:port` address.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
-        let stream = TcpStream::connect(addr)?;
-        let reader = BufReader::new(stream.try_clone()?);
-        Ok(Self { stream, reader })
+        if is_unix_socket(addr) {
+            let stream = UnixStream::connect(Path::new(addr))?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+            let reader_stream = stream.try_clone()?;
+            Ok(Self {
+                writer: Box::new(stream),
+                reader: BufReader::new(Box::new(reader_stream)),
+            })
+        } else {
+            let stream = TcpStream::connect(addr)?;
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+            let reader_stream = stream.try_clone()?;
+            Ok(Self {
+                writer: Box::new(stream),
+                reader: BufReader::new(Box::new(reader_stream)),
+            })
+        }
     }
 
     pub fn send(&mut self, cmd: &str) -> std::io::Result<ServerResponse> {
-        writeln!(self.stream, "{}", cmd)?;
-        self.stream.flush()?;
-
-        // Set read timeout to prevent indefinite blocking
-        self.stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+        writeln!(self.writer, "{}", cmd)?;
+        self.writer.flush()?;
 
         let mut line = String::new();
         self.reader.read_line(&mut line)?;

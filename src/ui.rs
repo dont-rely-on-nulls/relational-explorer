@@ -32,9 +32,7 @@ pub fn render(repl: &Repl, frame: &mut Frame) {
 
 fn render_help(repl: &Repl, frame: &mut Frame, area: Rect) {
     let widget = help_text(repl.mode)
-        .map(|(spans, style)| {
-            Paragraph::new(Text::from(Line::from(spans)).patch_style(style))
-        })
+        .map(|(spans, style)| Paragraph::new(Text::from(Line::from(spans)).patch_style(style)))
         .unwrap_or_default();
 
     frame.render_widget(widget, area);
@@ -155,7 +153,9 @@ fn messages_widget(repl: &Repl, height: u16) -> Paragraph<'_> {
 
 fn render_error_popup(frame: &mut Frame, kind: &str, msg: &str) {
     let area = frame.area();
-    let width = (area.width * 2 / 3).max(44).min(area.width.saturating_sub(4));
+    let width = (area.width * 2 / 3)
+        .max(44)
+        .min(area.width.saturating_sub(4));
 
     let inner_w = width.saturating_sub(2) as usize; // 2 for borders
     let body_lines: u16 = msg
@@ -183,20 +183,15 @@ fn render_error_popup(frame: &mut Frame, kind: &str, msg: &str) {
     frame.render_widget(block, popup_area);
 
     // Split inner area: body | footer hint
-    let [body_area, footer_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .areas(inner);
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
 
-    let body = Paragraph::new(msg)
-        .wrap(ratatui::widgets::Wrap { trim: false });
+    let body = Paragraph::new(msg).wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(body, body_area);
 
     let hint = "[ press any key to close ]";
     let hint_x = footer_area.x + footer_area.width.saturating_sub(hint.len() as u16) / 2;
-    let close_btn = Paragraph::new(hint)
-        .style(Style::default().fg(Color::DarkGray));
+    let close_btn = Paragraph::new(hint).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(
         close_btn,
         Rect::new(hint_x, footer_area.y, hint.len() as u16, 1),

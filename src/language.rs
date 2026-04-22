@@ -13,8 +13,10 @@ pub enum Tag {
 }
 
 impl Tag {
+    #[allow(dead_code)]
     pub const ALL: &[Tag] = &[Tag::Drl, Tag::Ddl, Tag::Dml, Tag::Icl, Tag::Dcl, Tag::Scl];
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             Tag::Drl => "drl",
@@ -40,6 +42,7 @@ impl Tag {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum InputClassification {
     /// Well-formed envelope with a known sublanguage tag.
     Envelope(Tag),
@@ -59,9 +62,7 @@ pub fn classify(input: &str) -> InputClassification {
 
     // Client-side shortcuts
     if trimmed == "(schema)" {
-        return InputClassification::Shortcut(
-            "(drl (Base sakura:attribute))".to_string(),
-        );
+        return InputClassification::Shortcut("(drl (Base sakura:attribute))".to_string());
     }
 
     // Try to parse as an S-expression
@@ -103,20 +104,37 @@ mod tests {
 
     #[test]
     fn known_envelope() {
-        assert!(matches!(classify("(ddl (CreateDatabase \"test\"))"), InputClassification::Envelope(Tag::Ddl)));
-        assert!(matches!(classify("(drl (Base sakura:attribute))"), InputClassification::Envelope(Tag::Drl)));
-        assert!(matches!(classify("(dcl GetHead)"), InputClassification::Envelope(Tag::Dcl)));
-        assert!(matches!(classify("(scl (Begin (query (Base sakura:attribute)) (limit 3)))"), InputClassification::Envelope(Tag::Scl)));
+        assert!(matches!(
+            classify("(ddl (CreateDatabase \"test\"))"),
+            InputClassification::Envelope(Tag::Ddl)
+        ));
+        assert!(matches!(
+            classify("(drl (Base sakura:attribute))"),
+            InputClassification::Envelope(Tag::Drl)
+        ));
+        assert!(matches!(
+            classify("(dcl GetHead)"),
+            InputClassification::Envelope(Tag::Dcl)
+        ));
+        assert!(matches!(
+            classify("(scl (Begin (query (Base sakura:attribute)) (limit 3)))"),
+            InputClassification::Envelope(Tag::Scl)
+        ));
     }
 
     #[test]
     fn unknown_tag() {
-        assert!(matches!(classify("(foo bar)"), InputClassification::UnknownTag(ref s) if s == "foo"));
+        assert!(
+            matches!(classify("(foo bar)"), InputClassification::UnknownTag(ref s) if s == "foo")
+        );
     }
 
     #[test]
     fn malformed_sexp() {
-        assert!(matches!(classify("(broken"), InputClassification::MalformedSexp(_)));
+        assert!(matches!(
+            classify("(broken"),
+            InputClassification::MalformedSexp(_)
+        ));
     }
 
     #[test]
