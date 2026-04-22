@@ -1,7 +1,8 @@
 use color_eyre::Result;
 use ratatui::DefaultTerminal;
+use std::fmt::Write as _;
 
-use crate::connection::{self, format_response, Connection};
+use crate::connection::{self, format_response, Connection, ServerResponse};
 
 pub struct QueryEntry {
     pub input: String,
@@ -61,16 +62,14 @@ impl Repl {
 
     fn event_loop(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         loop {
-            // Render with error recovery
             if let Err(e) = terminal.draw(|frame| crate::ui::render(self, frame)) {
                 eprintln!("Render error: {}", e);
                 continue;
             }
 
-            // Handle input with error recovery
             match crate::input::handle_event(self) {
-                Ok(should_quit) if should_quit => return Ok(()),
-                Ok(_) => {}
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
                 Err(e) => {
                     eprintln!("Input error: {}", e);
                     continue;
@@ -82,17 +81,14 @@ impl Repl {
     // Text editing
 
     pub fn move_cursor_left(&mut self) {
-        self.character_index = self
-            .character_index
-            .saturating_sub(1)
-            .clamp(0, self.input_length());
+        self.character_index = self.character_index.saturating_sub(1);
     }
 
     pub fn move_cursor_right(&mut self) {
-        self.character_index = self
-            .character_index
-            .saturating_add(1)
-            .clamp(0, self.input_length());
+        let len = self.input_length();
+        if self.character_index < len {
+            self.character_index += 1;
+        }
     }
 
     pub fn enter_char(&mut self, c: char) {
@@ -108,20 +104,24 @@ impl Repl {
 
     /// Deletes char before cursor (backspace behavior)
     pub fn delete_char(&mut self) {
-        if self.character_index > 0 {
-            let char_to_delete = self
-                .input
-                .chars()
-                .nth(self.character_index - 1)
-                .unwrap_or(' ');
+        if self.character_index == 0 {
+            return;
+        }
 
-            self.input = self.input_without_char_at(self.character_index - 1);
-            self.move_cursor_left();
+        let byte_idx = self.byte_index();
+        // Find the start of the previous character
+        let prev_char_start = self.input[..byte_idx]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let deleted = self.input.as_bytes()[prev_char_start];
 
-            // Update cursor_line if deleting a newline
-            if char_to_delete == '\n' && self.cursor_line > 0 {
-                self.cursor_line -= 1;
-            }
+        self.input.replace_range(prev_char_start..byte_idx, "");
+        self.character_index -= 1;
+
+        if deleted == b'\n' && self.cursor_line > 0 {
+            self.cursor_line -= 1;
         }
     }
 
@@ -129,8 +129,7 @@ impl Repl {
         if self.input.is_empty() {
             return;
         }
-        let cmd = self.input.clone();
-        self.input.clear();
+        let cmd = std::mem::take(&mut self.input);
         self.character_index = 0;
         self.cursor_line = 0;
         self.manual_scroll = 0;
@@ -153,9 +152,7 @@ impl Repl {
             Some(i) => i - 1,
         };
         self.history_index = Some(next);
-        self.input = self.messages[next].input.clone();
-        self.character_index = self.input.chars().count();
-        self.cursor_line = self.input.lines().count().saturating_sub(1);
+        self.set_input_from_history(next);
     }
 
     pub fn history_newer(&mut self) {
@@ -169,11 +166,15 @@ impl Repl {
             }
             Some(i) => {
                 self.history_index = Some(i + 1);
-                self.input = self.messages[i + 1].input.clone();
-                self.character_index = self.input.chars().count();
-                self.cursor_line = self.input.lines().count().saturating_sub(1);
+                self.set_input_from_history(i + 1);
             }
         }
+    }
+
+    fn set_input_from_history(&mut self, idx: usize) {
+        self.input.clone_from(&self.messages[idx].input);
+        self.character_index = self.input.chars().count();
+        self.cursor_line = self.input.lines().count().saturating_sub(1);
     }
 
     pub fn copy_last_result(&self) {
@@ -190,8 +191,7 @@ impl Repl {
     }
 
     fn execute_command(&mut self, cmd: &str) -> String {
-        // The server reads one command per line via input_line. Collapse
-        // multiline input to a single line so the protocol stays in sync.
+        // Collapse multiline input to a single line for the wire protocol.
         let cmd = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
 
         // Client-side validation: catch malformed S-expressions before sending.
@@ -201,66 +201,65 @@ impl Repl {
             return format!("Syntax error: {}", err);
         }
 
-        // Rewrite client shortcuts (e.g. (schema) → (drl (Base sakura:attribute))).
+        // Rewrite client shortcuts (e.g. (schema) -> (drl (Base sakura:attribute))).
         let cmd = crate::language::rewrite(&cmd);
 
-        let result = if let Some(conn) = &mut self.connection {
-            conn.send(&cmd).map_err(|e| e.to_string())
-        } else {
-            Err(String::from("not connected"))
+        let result = self.send_or_reconnect(&cmd);
+        match result {
+            Ok(resp) => self.handle_response(&resp),
+            Err(err) => err,
+        }
+    }
+
+    /// Try to send a command; on failure, attempt to reconnect and retry once.
+    fn send_or_reconnect(&mut self, cmd: &str) -> Result<ServerResponse, String> {
+        // First attempt
+        let first_err = match &mut self.connection {
+            Some(conn) => match conn.send(cmd) {
+                Ok(resp) => return Ok(resp),
+                Err(e) => e.to_string(),
+            },
+            None => String::from("not connected"),
         };
 
-        match result {
-            Ok(resp) => {
-                self.db_hash = resp.db_hash().to_string();
-                self.db_name = resp.db_name().to_string();
-                self.branch = resp.branch().to_string();
-                if let Some((kind, msg)) = connection::error_parts(&resp) {
-                    self.error_popup = Some((kind.to_string(), msg.to_string()));
-                    String::new()
-                } else {
-                    format_response(&resp)
+        // Reconnect and retry
+        match connection::Connection::connect(&self.server_addr) {
+            Ok(mut conn) => match conn.send(cmd) {
+                Ok(resp) => {
+                    self.connection = Some(conn);
+                    Ok(resp)
                 }
-            }
-            Err(send_err) => {
-                // Try to (re)connect and retry once
-                match connection::Connection::connect(&self.server_addr) {
-                    Ok(mut conn) => match conn.send(&cmd) {
-                        Ok(resp) => {
-                            self.db_hash = resp.db_hash().to_string();
-                            self.db_name = resp.db_name().to_string();
-                            self.branch = resp.branch().to_string();
-                            let rendered = format_response(&resp);
-                            self.connection = Some(conn);
-                            rendered
-                        }
-                        Err(retry_err) => {
-                            self.connection = Some(conn);
-                            format!(
-                                "ERROR: failed to parse server response: {} (retry error: {})",
-                                send_err, retry_err
-                            )
-                        }
-                    },
-                    Err(connect_err) => {
-                        self.connection = None;
-                        format!(
-                            "ERROR: server unreachable ({}): {}",
-                            self.server_addr, connect_err
-                        )
-                    }
+                Err(retry_err) => {
+                    self.connection = Some(conn);
+                    Err(format!(
+                        "ERROR: failed to parse server response: {} (retry error: {})",
+                        first_err, retry_err
+                    ))
                 }
+            },
+            Err(connect_err) => {
+                self.connection = None;
+                Err(format!(
+                    "ERROR: server unreachable ({}): {}",
+                    self.server_addr, connect_err
+                ))
             }
         }
     }
 
-    fn input_without_char_at(&self, pos: usize) -> String {
-        self.input
-            .chars()
-            .enumerate()
-            .filter(|(i, _)| *i != pos)
-            .map(|(_, c)| c)
-            .collect()
+    /// Process a successful server response: update metadata, show error popup or format output.
+    fn handle_response(&mut self, resp: &ServerResponse) -> String {
+        let meta = resp.meta();
+        self.db_hash.clone_from(&meta.db_hash);
+        self.db_name.clone_from(&meta.db_name);
+        self.branch.clone_from(&meta.branch);
+
+        if let Some((kind, msg)) = connection::error_parts(resp) {
+            self.error_popup = Some((kind.to_string(), msg.to_string()));
+            String::new()
+        } else {
+            format_response(resp)
+        }
     }
 
     // Scrolling
@@ -285,11 +284,17 @@ impl Repl {
     pub fn total_content_lines(&self) -> u16 {
         self.messages
             .iter()
-            .map(|entry| format!("sakura=> {}\n\n{}\n", entry.input, entry.rendered))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .lines()
-            .count() as u16
+            .map(|entry| {
+                // "sakura=> {input}\n\n{rendered}\n" + "\n" separator between entries
+                let entry_lines = 1 // "sakura=> ..." line(s)
+                    + entry.input.lines().count().saturating_sub(1) // extra input lines
+                    + 1 // blank line
+                    + entry.rendered.lines().count().max(1) // rendered output
+                    + 1; // trailing newline
+                entry_lines
+            })
+            .sum::<usize>()
+            .saturating_sub(1) as u16 // last entry has no separator
     }
 
     fn apply_manual_scroll(&self, base: u16) -> u16 {
@@ -313,4 +318,16 @@ impl Repl {
     fn input_length(&self) -> usize {
         self.input.chars().count()
     }
+}
+
+/// Build the full query results text for display.
+pub fn build_query_results(repl: &Repl) -> String {
+    let mut out = String::new();
+    for (i, entry) in repl.messages.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let _ = write!(out, "sakura=> {}\n\n{}\n", entry.input, entry.rendered);
+    }
+    out
 }

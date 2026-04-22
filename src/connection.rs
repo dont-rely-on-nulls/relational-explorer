@@ -4,6 +4,14 @@ use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+/// Metadata common to every server response.
+#[derive(Debug, Clone)]
+pub struct ResponseMeta {
+    pub db_hash: String,
+    pub db_name: String,
+    pub branch: String,
+}
+
 #[derive(Debug)]
 pub enum ServerResponse {
     Relation {
@@ -12,31 +20,23 @@ pub enum ServerResponse {
         rows: Vec<Vec<(String, String)>>,
         row_count: u32,
         truncated: bool,
-        db_hash: String,
-        db_name: String,
-        branch: String,
+        meta: ResponseMeta,
     },
     Ok {
         message: String,
-        db_hash: String,
-        db_name: String,
-        branch: String,
+        meta: ResponseMeta,
     },
     Error {
         kind: String,
         message: String,
-        db_hash: String,
-        db_name: String,
-        branch: String,
+        meta: ResponseMeta,
     },
     Cursor {
         cursor_id: String,
         rows: Vec<Vec<(String, String)>>,
         row_count: u32,
         has_more: bool,
-        db_hash: String,
-        db_name: String,
-        branch: String,
+        meta: ResponseMeta,
     },
 }
 
@@ -48,30 +48,12 @@ pub struct SchemaField {
 }
 
 impl ServerResponse {
-    pub fn db_hash(&self) -> &str {
+    pub fn meta(&self) -> &ResponseMeta {
         match self {
-            ServerResponse::Relation { db_hash, .. } => db_hash,
-            ServerResponse::Ok { db_hash, .. } => db_hash,
-            ServerResponse::Error { db_hash, .. } => db_hash,
-            ServerResponse::Cursor { db_hash, .. } => db_hash,
-        }
-    }
-
-    pub fn db_name(&self) -> &str {
-        match self {
-            ServerResponse::Relation { db_name, .. } => db_name,
-            ServerResponse::Ok { db_name, .. } => db_name,
-            ServerResponse::Error { db_name, .. } => db_name,
-            ServerResponse::Cursor { db_name, .. } => db_name,
-        }
-    }
-
-    pub fn branch(&self) -> &str {
-        match self {
-            ServerResponse::Relation { branch, .. } => branch,
-            ServerResponse::Ok { branch, .. } => branch,
-            ServerResponse::Error { branch, .. } => branch,
-            ServerResponse::Cursor { branch, .. } => branch,
+            ServerResponse::Relation { meta, .. }
+            | ServerResponse::Ok { meta, .. }
+            | ServerResponse::Error { meta, .. }
+            | ServerResponse::Cursor { meta, .. } => meta,
         }
     }
 }
@@ -103,7 +85,6 @@ pub fn format_response(resp: &ServerResponse) -> String {
             has_more,
             ..
         } => {
-            // Infer schema from first row's keys (cursor responses are self-describing)
             let schema: Vec<SchemaField> = rows
                 .first()
                 .map(|row| {
@@ -131,7 +112,7 @@ pub fn format_response(resp: &ServerResponse) -> String {
 
 pub fn error_parts(resp: &ServerResponse) -> Option<(&str, &str)> {
     match resp {
-        ServerResponse::Error { kind, message, .. } => Some((kind.as_str(), message.as_str())),
+        ServerResponse::Error { kind, message, .. } => Some((kind, message)),
         _ => None,
     }
 }
@@ -143,10 +124,10 @@ fn render_table(schema: &[SchemaField], rows: &[Vec<(String, String)>]) -> Strin
 
     let mut table = AsciiTable::default();
     for (i, field) in schema.iter().enumerate() {
-        table.column(i).set_header(field.attr.as_str());
+        table.column(i).set_header(&*field.attr);
     }
 
-    let data: Vec<Vec<String>> = rows
+    let data: Vec<Vec<&str>> = rows
         .iter()
         .map(|row| {
             schema
@@ -154,8 +135,8 @@ fn render_table(schema: &[SchemaField], rows: &[Vec<(String, String)>]) -> Strin
                 .map(|field| {
                     row.iter()
                         .find(|(k, _)| k == &field.attr)
-                        .map(|(_, v)| v.clone())
-                        .unwrap_or_else(|| String::from("?"))
+                        .map(|(_, v)| v.as_str())
+                        .unwrap_or("?")
                 })
                 .collect()
         })
@@ -168,13 +149,6 @@ fn render_table(schema: &[SchemaField], rows: &[Vec<(String, String)>]) -> Strin
 
 // --- S-expression parsing ---
 
-/// Extract a displayable string from an S-expression atom.
-///
-/// Maps the OCaml `AbstractValue.sexp_of_t` output to Rust strings:
-///   - integers  → `Atom::I(n)` → decimal string
-///   - floats    → `Atom::F(f)` → float string (includes NaN)
-///   - strings   → `Atom::S(s)` → verbatim
-///   - opaque    → `Atom::S("<opaque>")`
 fn atom_string(s: &sexp::Sexp) -> Option<String> {
     match s {
         sexp::Sexp::Atom(sexp::Atom::S(s)) => Some(s.clone()),
@@ -209,23 +183,64 @@ fn get_str(items: &[sexp::Sexp], key: &str) -> Option<String> {
     get_field(items, key).and_then(|v| atom_string(v))
 }
 
-/// Insert a space before any `"` that is not preceded by a sexp delimiter
-/// (`(`, `)`, whitespace, or `\`).  OCaml's Sexplib serialises atoms and
-/// quoted strings without an intervening space (e.g. `(name"C. J. Date")`),
-/// but the `sexp` crate's unquoted-atom parser does not treat `"` as a
-/// token boundary, so the atom and the opening quote get merged into one
-/// token.  This pre-pass fixes the encoding before handing the string to
-/// the parser.
+/// Extract the common db_hash / db_name / branch metadata from a response's fields.
+fn parse_meta(rest: &[sexp::Sexp]) -> ResponseMeta {
+    ResponseMeta {
+        db_hash: get_str(rest, "db_hash").unwrap_or_default(),
+        db_name: get_str(rest, "db_name").unwrap_or_default(),
+        branch: get_str(rest, "branch").unwrap_or_else(|| "--".to_string()),
+    }
+}
+
+/// Parse a list of `((key value) ...)` pairs from the sexp rows field.
+fn parse_rows(rest: &[sexp::Sexp]) -> Vec<Vec<(String, String)>> {
+    match get_field(rest, "rows") {
+        Some(sexp::Sexp::List(row_list)) => row_list
+            .iter()
+            .filter_map(|row| {
+                if let sexp::Sexp::List(pairs) = row {
+                    Some(parse_kv_pairs(pairs))
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Parse key-value pairs from a list of `(key value)` S-expressions.
+fn parse_kv_pairs(pairs: &[sexp::Sexp]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .filter_map(|pair| {
+            if let sexp::Sexp::List(p) = pair {
+                if p.len() == 2 {
+                    let k = atom_string(&p[0])?;
+                    let v = atom_string(&p[1])?;
+                    return Some((k, v));
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// Insert a space before any `"` that is not preceded by a sexp delimiter.
+/// OCaml's Sexplib serialises atoms and quoted strings without an intervening
+/// space, but the `sexp` crate's parser doesn't treat `"` as a token boundary.
 fn normalize_sexp_spacing(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 16);
-    let chars: Vec<char> = s.chars().collect();
-    for (i, &ch) in chars.iter().enumerate() {
-        if ch == '"' && i > 0 {
-            let prev = chars[i - 1];
-            if prev != '(' && prev != ')' && prev != '\\' && !prev.is_whitespace() {
-                out.push(' ');
+    let mut prev = None::<char>;
+    for ch in s.chars() {
+        if ch == '"' {
+            if let Some(p) = prev {
+                if p != '(' && p != ')' && p != '\\' && !p.is_whitespace() {
+                    out.push(' ');
+                }
             }
         }
+        prev = Some(ch);
         out.push(ch);
     }
     out
@@ -233,8 +248,7 @@ fn normalize_sexp_spacing(s: &str) -> String {
 
 fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
     let normalized = normalize_sexp_spacing(s);
-    let s = normalized.as_str();
-    let sexp = sexp::parse(s)
+    let sexp = sexp::parse(&normalized)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
     let items = match &sexp {
@@ -253,6 +267,7 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing tag"))?;
 
     let rest = &items[1..];
+    let meta = parse_meta(rest);
 
     match tag.as_str() {
         "ok" => {
@@ -260,15 +275,7 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 Some(field) => atom_string_debug(field),
                 None => "(message field missing)".to_string(),
             };
-            let db_hash = get_str(rest, "db_hash").unwrap_or_default();
-            let db_name = get_str(rest, "db_name").unwrap_or_default();
-            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
-            Ok(ServerResponse::Ok {
-                message,
-                db_hash,
-                db_name,
-                branch,
-            })
+            Ok(ServerResponse::Ok { message, meta })
         }
         "error" => {
             let raw = match get_field(rest, "message") {
@@ -282,22 +289,14 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 Some((k, m)) => (k.to_string(), m.to_string()),
                 None => (String::from("Error"), raw),
             };
-            let db_hash = get_str(rest, "db_hash").unwrap_or_default();
-            let db_name = get_str(rest, "db_name").unwrap_or_default();
-            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
             Ok(ServerResponse::Error {
                 kind,
                 message,
-                db_hash,
-                db_name,
-                branch,
+                meta,
             })
         }
         "relation" => {
             let name = get_str(rest, "name").unwrap_or_default();
-            let db_hash = get_str(rest, "db_hash").unwrap_or_default();
-            let db_name = get_str(rest, "db_name").unwrap_or_default();
-            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
             let row_count = get_str(rest, "row_count")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
@@ -320,33 +319,7 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 _ => vec![],
             };
 
-            let rows = match get_field(rest, "rows") {
-                Some(sexp::Sexp::List(row_list)) => row_list
-                    .iter()
-                    .filter_map(|row| {
-                        if let sexp::Sexp::List(pairs) = row {
-                            Some(
-                                pairs
-                                    .iter()
-                                    .filter_map(|pair| {
-                                        if let sexp::Sexp::List(p) = pair {
-                                            if p.len() == 2 {
-                                                let k = atom_string(&p[0])?;
-                                                let v = atom_string(&p[1])?;
-                                                return Some((k, v));
-                                            }
-                                        }
-                                        None
-                                    })
-                                    .collect(),
-                            )
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                _ => vec![],
-            };
+            let rows = parse_rows(rest);
 
             Ok(ServerResponse::Relation {
                 name,
@@ -354,57 +327,23 @@ fn parse_response(s: &str) -> std::io::Result<ServerResponse> {
                 rows,
                 row_count,
                 truncated,
-                db_hash,
-                db_name,
-                branch,
+                meta,
             })
         }
         "cursor" => {
             let cursor_id = get_str(rest, "id").unwrap_or_default();
-            let db_hash = get_str(rest, "db_hash").unwrap_or_default();
-            let db_name = get_str(rest, "db_name").unwrap_or_default();
-            let branch = get_str(rest, "branch").unwrap_or_else(|| "--".to_string());
             let row_count = get_str(rest, "row_count")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0);
             let has_more = get_str(rest, "has_more").as_deref() == Some("true");
-
-            let rows = match get_field(rest, "rows") {
-                Some(sexp::Sexp::List(row_list)) => row_list
-                    .iter()
-                    .filter_map(|row| {
-                        if let sexp::Sexp::List(pairs) = row {
-                            Some(
-                                pairs
-                                    .iter()
-                                    .filter_map(|pair| {
-                                        if let sexp::Sexp::List(p) = pair {
-                                            if p.len() == 2 {
-                                                let k = atom_string(&p[0])?;
-                                                let v = atom_string(&p[1])?;
-                                                return Some((k, v));
-                                            }
-                                        }
-                                        None
-                                    })
-                                    .collect(),
-                            )
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                _ => vec![],
-            };
+            let rows = parse_rows(rest);
 
             Ok(ServerResponse::Cursor {
                 cursor_id,
                 rows,
                 row_count,
                 has_more,
-                db_hash,
-                db_name,
-                branch,
+                meta,
             })
         }
         other => Err(std::io::Error::new(
@@ -436,19 +375,23 @@ impl Connection {
             let stream = UnixStream::connect(Path::new(addr))?;
             stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
             let reader_stream = stream.try_clone()?;
-            Ok(Self {
-                writer: Box::new(stream),
-                reader: BufReader::new(Box::new(reader_stream)),
-            })
+            Self::from_streams(stream, reader_stream)
         } else {
             let stream = TcpStream::connect(addr)?;
             stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
             let reader_stream = stream.try_clone()?;
-            Ok(Self {
-                writer: Box::new(stream),
-                reader: BufReader::new(Box::new(reader_stream)),
-            })
+            Self::from_streams(stream, reader_stream)
         }
+    }
+
+    fn from_streams<W: Write + Send + 'static, R: Read + Send + 'static>(
+        writer: W,
+        reader: R,
+    ) -> std::io::Result<Self> {
+        Ok(Self {
+            writer: Box::new(writer),
+            reader: BufReader::new(Box::new(reader)),
+        })
     }
 
     pub fn send(&mut self, cmd: &str) -> std::io::Result<ServerResponse> {

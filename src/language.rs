@@ -86,9 +86,12 @@ pub fn classify(input: &str) -> InputClassification {
 
 /// Rewrite client shortcuts, passing everything else through unchanged.
 pub fn rewrite(input: &str) -> String {
-    match classify(input) {
-        InputClassification::Shortcut(replacement) => replacement,
-        _ => input.to_string(),
+    let trimmed = input.trim();
+    // Fast path: only known shortcut is (schema)
+    if trimmed == "(schema)" {
+        "(drl (Base sakura:attribute))".to_string()
+    } else {
+        input.to_string()
     }
 }
 

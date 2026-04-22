@@ -199,9 +199,5 @@ fn render_error_popup(frame: &mut Frame, kind: &str, msg: &str) {
 }
 
 fn build_query_results(repl: &Repl) -> String {
-    repl.messages
-        .iter()
-        .map(|entry| format!("sakura=> {}\n\n{}\n", entry.input, entry.rendered))
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::repl::build_query_results(repl)
 }
