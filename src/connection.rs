@@ -1,7 +1,9 @@
 use ascii_table::AsciiTable;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::Path;
 
 /// Metadata common to every server response.
@@ -372,16 +374,23 @@ impl Connection {
     /// TCP `host:port` address.
     pub fn connect(addr: &str) -> std::io::Result<Self> {
         if is_unix_socket(addr) {
-            let stream = UnixStream::connect(Path::new(addr))?;
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-            let reader_stream = stream.try_clone()?;
-            Self::from_streams(stream, reader_stream)
-        } else {
-            let stream = TcpStream::connect(addr)?;
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-            let reader_stream = stream.try_clone()?;
-            Self::from_streams(stream, reader_stream)
+            #[cfg(unix)]
+            {
+                let stream = UnixStream::connect(Path::new(addr))?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+                let reader_stream = stream.try_clone()?;
+                return Self::from_streams(stream, reader_stream);
+            }
+            #[cfg(not(unix))]
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Unix domain sockets are not supported on this platform; use a TCP address instead",
+            ));
         }
+        let stream = TcpStream::connect(addr)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+        let reader_stream = stream.try_clone()?;
+        Self::from_streams(stream, reader_stream)
     }
 
     fn from_streams<W: Write + Send + 'static, R: Read + Send + 'static>(

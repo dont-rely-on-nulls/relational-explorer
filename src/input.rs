@@ -72,9 +72,9 @@ fn handle_editing_mode(repl: &mut Repl, key: KeyCode, modifiers: KeyModifiers) -
         Esc => repl.mode = InputMode::Normal,
         Enter => {
             if modifiers.contains(KeyModifiers::ALT) {
-                repl.submit_message();
-            } else {
                 repl.enter_newline();
+            } else {
+                repl.submit_message();
             }
         }
         Backspace => repl.delete_char(),
